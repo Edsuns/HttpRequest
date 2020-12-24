@@ -1,9 +1,6 @@
 package net;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.*;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -24,21 +21,65 @@ public class HttpRequest {
 
     private static final int HTTP_TEMP_REDIRECT = 307; // http/1.1 temporary redirect, not in Java's set.
 
-    private static final String LOCATION = "Location";
-    private static final String USER_AGENT = "User-Agent";
-    private static final String ACCEPT_CHARSET = "Accept-Charset";
+    // request header names
+    public static final String LOCATION = "Location";
+    public static final String USER_AGENT = "User-Agent";
+    public static final String ACCEPT_CHARSET = "Accept-Charset";
+    public static final String COOKIE = "Cookie";
+    public static final String CONTENT_TYPE = "Content-Type";
+    // Content-Type
+    public static final String MULTIPART_FORM_DATA = "multipart/form-data";
+    public static final String FORM_URL_ENCODED = "application/x-www-form-urlencoded";
+    // response header names
+    public static final String SET_COOKIE = "Set-Cookie";
+
+    /**
+     * http request methods
+     */
+    public enum Method {
+        GET(false), POST(true), HEAD(false), OPTIONS(false),
+        PUT(true), DELETE(false), PATCH(true), TRACE(false);
+
+        private final boolean hasBody;
+
+        Method(boolean hasBody) {
+            this.hasBody = hasBody;
+        }
+
+        /**
+         * Check if this HTTP method has/needs a request body
+         *
+         * @return if body needed
+         */
+        public final boolean hasBody() {
+            return hasBody;
+        }
+    }
 
     private URL url;
-    private Proxy proxy;
+    private final Proxy proxy;
+    private String[][] headers;
+    private boolean followRedirects = HttpURLConnection.getFollowRedirects();
+    private int timeout = DEFAULT_TIMEOUT;
     private HttpURLConnection connection;
     private List<String> redirects;
+    private Map<String, String> cookies;
     private int status;
     private Map<String, List<String>> responseHeaders;
     private Charset encoding;
     private byte[] bodyBytes;
+    private String body;
+
+    public HttpRequest(String url) throws IOException {
+        this(new URL(url));
+    }
+
+    public HttpRequest(String url, Proxy proxy) throws IOException {
+        this(new URL(url), proxy);
+    }
 
     public HttpRequest(URL url) {
-        this.url = url;
+        this(url, null);
     }
 
     public HttpRequest(URL url, Proxy proxy) {
@@ -46,27 +87,51 @@ public class HttpRequest {
         this.proxy = proxy;
     }
 
-    public HttpRequest(String url) throws MalformedURLException {
-        this.url = new URL(url);
+    public HttpRequest timeout(int timeout) {
+        this.timeout = timeout;
+        return this;
     }
 
-    public HttpRequest(String url, Proxy proxy) throws MalformedURLException {
-        this.url = new URL(url);
-        this.proxy = proxy;
+    public HttpRequest headers(String[][] headers) {
+        this.headers = headers;
+        return this;
+    }
+
+    public HttpRequest followRedirects(boolean followRedirects) {
+        this.followRedirects = followRedirects;
+        return this;
+    }
+
+    public HttpRequest cookies(Map<String, String> cookies) {
+        this.cookies = cookies;
+        return this;
     }
 
     public HttpRequest exec() throws IOException {
-        return exec(DEFAULT_TIMEOUT);
+        return exec(Method.GET);
     }
 
-    public HttpRequest exec(int timeout) throws IOException {
+    public HttpRequest exec(Method method) throws IOException {
+        return exec(method, null);
+    }
+
+    public HttpRequest exec(Data data) throws IOException {
+        return exec(Method.GET, data);
+    }
+
+    public HttpRequest exec(Method method, Data data) throws IOException {
         List<String> rds = new ArrayList<>();
-        connection = openConnectionWithRedirects(url, proxy, timeout, rds, new String[][]{
-                {USER_AGENT, DEFAULT_USER_AGENT},
-                {ACCEPT_CHARSET, DEFAULT_ENCODING.name()}
-        });
+        Map<String, String> cks = cookies != null ? cookies : new HashMap<>();
+        connection = openConnectionWithRedirects(url, proxy, method, timeout, followRedirects ? REDIRECTS_MAX : 0,
+                concat(new String[][]{
+                        {USER_AGENT, DEFAULT_USER_AGENT},
+                        {ACCEPT_CHARSET, DEFAULT_ENCODING.name()}
+                }, headers),
+                data, rds, cks
+        );
         url = connection.getURL();
         redirects = Collections.unmodifiableList(rds);
+        cookies = Collections.unmodifiableMap(cks);
         // get status
         status = connection.getResponseCode();
         // response headers
@@ -81,6 +146,8 @@ public class HttpRequest {
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
         crossStreams(connection.getInputStream(), bo);
         bodyBytes = bo.toByteArray();
+        if (encoding != null && bodyBytes.length > 0)
+            body = new String(bodyBytes, 0, bodyBytes.length, encoding.name());
         // disconnect
         connection.disconnect();
         return this;
@@ -102,6 +169,10 @@ public class HttpRequest {
         return redirects;
     }
 
+    public Map<String, String> getCookies() {
+        return cookies;
+    }
+
     public int getStatus() {
         return status;
     }
@@ -119,34 +190,41 @@ public class HttpRequest {
     }
 
     public String getBody() {
-        return new String(bodyBytes, 0, bodyBytes.length, encoding);
+        return body;
     }
 
-    private static Charset getEncoding(HttpURLConnection connection) {
+    public boolean isBodyEmpty() {
+        return bodyBytes == null || bodyBytes.length == 0;
+    }
+
+    public boolean hasTextBody() {
+        return body != null;
+    }
+
+    public static Charset getEncoding(HttpURLConnection connection) {
         String contentEncoding = connection.getContentEncoding();
         if (contentEncoding != null) {
-            return fallbackEncoding(contentEncoding);
+            return Charset.forName(contentEncoding);
         }
 
         String contentType = connection.getContentType();
-        for (String value : contentType.split(";")) {
-            value = value.trim();
-            if (value.toLowerCase(Locale.US).startsWith("charset=")) {
-                return fallbackEncoding(value.substring(8));
+        if (contentType != null) {
+            for (String value : contentType.toLowerCase(Locale.US).split(";")) {
+                value = value.trim();
+                if (value.startsWith("charset="))
+                    return Charset.forName(value.substring(8));
             }
         }
 
-        return DEFAULT_ENCODING;
+        return null;
     }
 
-    private static Charset fallbackEncoding(String encoding) {
-        if (StandardCharsets.UTF_8.name().equalsIgnoreCase(encoding))
-            return StandardCharsets.UTF_8;
-        if (StandardCharsets.ISO_8859_1.name().equalsIgnoreCase(encoding))
-            return StandardCharsets.ISO_8859_1;
-        if (StandardCharsets.US_ASCII.name().equalsIgnoreCase(encoding))
-            return StandardCharsets.US_ASCII;
-        return DEFAULT_ENCODING;
+    public static <T> T[] concat(T[] a, T[] b) {
+        if (b == null || b.length <= 0)
+            return a;
+        T[] both = Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, both, a.length, b.length);
+        return both;
     }
 
     public static void crossStreams(InputStream inputStream, OutputStream outputStream) throws IOException {
@@ -157,29 +235,214 @@ public class HttpRequest {
         }
     }
 
-    public static HttpURLConnection openConnectionWithRedirects(
-            URL url, Proxy proxy, int timeout,
-            List<String> tempRedirects, String[][] requestHeaders) throws IOException {
+    // create HttpURLConnection but don't trigger any connections
+    static HttpURLConnection createConnection(URL url, Proxy proxy, Method method, int timeout,
+                                              Map<String, String> cookies) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) (proxy == null ? url.openConnection() : url.openConnection(proxy));
+        conn.setRequestMethod(method.name());
+        conn.setConnectTimeout(timeout);
+        conn.setReadTimeout(timeout);
+        // disable native redirection, use our method instead
+        // for some unknown reason, native redirection doesn't work if set User-Agent request header
+        conn.setInstanceFollowRedirects(false);
+        conn.setDoOutput(method.hasBody());
+        // set request cookie
+        if (cookies != null && cookies.size() > 0) {
+            conn.setRequestProperty(COOKIE, toRequestCookieString(cookies));
+        }
+        return conn;
+    }
+
+    private static final char[] mimeBoundaryChars =
+            "-_1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
+    static final int boundaryLength = 32;
+
+    /**
+     * Creates a random string, suitable for use as a mime boundary
+     */
+    static String mimeBoundary() {
+        final StringBuilder mime = new StringBuilder();
+        final Random rand = new Random();
+        for (int i = 0; i < boundaryLength; i++) {
+            mime.append(mimeBoundaryChars[rand.nextInt(mimeBoundaryChars.length)]);
+        }
+        return mime.toString();
+    }
+
+    static URL serialiseRequestUrl(URL in, Data data) throws UnsupportedEncodingException, MalformedURLException {
+        StringBuilder url = new StringBuilder();
+        boolean first = true;
+        // reconstitute the query, ready for appends
+        url.append(in.getProtocol())
+                .append("://")
+                .append(in.getAuthority()) // includes host, port
+                .append(in.getPath())
+                .append("?");
+        if (in.getQuery() != null) {
+            url.append(in.getQuery());
+            first = false;
+        }
+        for (String[] keyVal : data.dataList) {
+            if (!first)
+                url.append('&');
+            else
+                first = false;
+            url.append(URLEncoder.encode(keyVal[0], DEFAULT_ENCODING.name()))
+                    .append('=')
+                    .append(URLEncoder.encode(keyVal[1], DEFAULT_ENCODING.name()));
+        }
+        data.dataList.clear(); // moved into url as get params
+        return new URL(url.toString());
+    }
+
+    static String setOutputContentType(HttpURLConnection conn) {
+        String bound = null;
+        String contentType = conn.getRequestProperty(CONTENT_TYPE);
+        if (contentType != null) {
+            if (contentType.contains(MULTIPART_FORM_DATA) && !contentType.contains("boundary")) {
+                bound = mimeBoundary();
+                conn.setRequestProperty(CONTENT_TYPE, MULTIPART_FORM_DATA + "; boundary=" + bound);
+            }
+        } else {
+            conn.setRequestProperty(CONTENT_TYPE, FORM_URL_ENCODED + "; charset=" + DEFAULT_ENCODING.name());
+        }
+        return bound;
+    }
+
+    private static String encodeMimeName(String val) {
+        if (val == null)
+            return null;
+        return val.replace("\"", "%22");
+    }
+
+    static void writePost(final Data data, final OutputStream outputStream, final String bound) throws IOException {
+        if (data == null || data.dataList.isEmpty())
+            return;
+
+        final BufferedWriter w = new BufferedWriter(new OutputStreamWriter(outputStream, DEFAULT_ENCODING));
+
+        if (bound != null) {
+            // boundary will be set if we're in multipart mode
+            for (String[] keyVal : data.dataList) {
+                w.write("--");
+                w.write(bound);
+                w.write("\r\n");
+                w.write("Content-Disposition: form-data; name=\"");
+                w.write(encodeMimeName(keyVal[0])); // encodes " to %22
+                w.write("\"");
+                w.write("\r\n\r\n");
+                w.write(keyVal[1]);
+                w.write("\r\n");
+            }
+            w.write("--");
+            w.write(bound);
+            w.write("--");
+        } else {
+            // regular form data (application/x-www-form-urlencoded)
+            boolean first = true;
+            for (String[] keyVal : data.dataList) {
+                if (!first)
+                    w.append('&');
+                else
+                    first = false;
+
+                w.write(URLEncoder.encode(keyVal[0], DEFAULT_ENCODING.name()));
+                w.write('=');
+                w.write(URLEncoder.encode(keyVal[1], DEFAULT_ENCODING.name()));
+            }
+        }
+        w.close();
+    }
+
+    /**
+     * Parse response cookies into a no-duplicate-names cookie map
+     *
+     * @param respCookies cookies from response
+     * @return cookie map
+     */
+    static Map<String, String> getCookiesFrom(List<String> respCookies) {
+        if (respCookies == null || respCookies.size() <= 0)
+            return null;
+        Map<String, String> cookies = new HashMap<>();
+        for (String cookie : respCookies) {
+            if (cookie == null)
+                continue;
+            TokenQueue cd = new TokenQueue(cookie);
+            String cookieName = cd.chompTo("=").trim();
+            // name not blank, cookie not null
+            if (cookieName.length() > 0) {
+                // contains path, date, domain, validateTLSCertificates et al
+                cookies.put(cookieName, cookie);
+            }
+        }
+        return cookies;
+    }
+
+    /**
+     * Parse cookies into request cookie string
+     * <p>Request cookie ignores path, date, domain, validateTLSCertificates et al.</p>
+     *
+     * @param cookies can be either a request cookie
+     * @return request cookie
+     */
+    static String toRequestCookieString(Map<String, String> cookies) {
+        final StringBuilder builder = new StringBuilder();
+        boolean first = true;
+        for (Map.Entry<String, String> cookie : cookies.entrySet()) {
+            if (!first)
+                builder.append("; ");
+            else
+                first = false;
+
+            String val = cookie.getValue();
+            TokenQueue cd = new TokenQueue(val);
+            cd.chompTo("=");
+            String cookieVal = cd.consumeTo(";").trim();
+
+            builder.append(cookie.getKey()).append('=').append(cookieVal);
+            // TODO: spec says only ascii, no escaping / encoding defined. validate on set? or escape somehow here?
+        }
+        return builder.toString();
+    }
+
+    static HttpURLConnection openConnectionWithRedirects(
+            URL url, Proxy proxy, Method method, int timeout, int redirectsMax, String[][] requestHeaders, Data data,
+            List<String> tempRedirects, Map<String, String> tempCookies) throws IOException {
+        String protocol = url.getProtocol();
+        if (!protocol.equals("http") && !protocol.equals("https"))
+            throw new MalformedURLException("Only http & https protocols supported");
         final boolean hasRequestHeaders = requestHeaders != null && requestHeaders.length > 0;
         int redirects = 0;
         do {
-            HttpURLConnection conn = (HttpURLConnection) (proxy == null ? url.openConnection() : url.openConnection(proxy));
-            conn.setConnectTimeout(timeout);
-            conn.setReadTimeout(timeout);
-            // disable default FollowRedirects, use our method instead
-            // for some unknown reason, default FollowRedirects doesn't work if set User-Agent request header
-            conn.setInstanceFollowRedirects(false);
+            final boolean methodHasBody = method.hasBody();
+            final boolean hasRequestData = data != null && !data.dataList.isEmpty();
+
+            if (!methodHasBody && hasRequestData)
+                url = serialiseRequestUrl(url, data);
+            HttpURLConnection conn = createConnection(url, proxy, method, timeout, tempCookies);
             // record redirects
             tempRedirects.add(url.toString());
 
+            // set request headers
             if (hasRequestHeaders) {
                 for (String[] header : requestHeaders) {
                     conn.setRequestProperty(header[0], header[1]);
                 }
             }
+            String mimeBoundary = null;
+            if (methodHasBody)
+                mimeBoundary = setOutputContentType(conn);
+
+            conn.connect();
+            if (conn.getDoOutput())
+                writePost(data, conn.getOutputStream(), mimeBoundary);
+
+            List<String> respCookies = conn.getHeaderFields().get(SET_COOKIE);
+            if (respCookies != null)
+                tempCookies.putAll(getCookiesFrom(respCookies));
 
             int status = conn.getResponseCode();
-            if (status >= HTTP_MULT_CHOICE && status <= HTTP_TEMP_REDIRECT
+            if (redirectsMax > 0 && status >= HTTP_MULT_CHOICE && status <= HTTP_TEMP_REDIRECT
                     && status != 306 && status != HTTP_NOT_MODIFIED) {
                 URL base = conn.getURL();
                 String loc = conn.getHeaderField(LOCATION);
@@ -191,13 +454,135 @@ public class HttpRequest {
                 if (target == null) {
                     throw new SecurityException("Illegal URL redirect");
                 }
+                // always redirect with a get. any data param from original request are dropped.
+                if (status != HTTP_TEMP_REDIRECT) {
+                    if (hasRequestData)
+                        data.dataList.clear();
+                    method = Method.GET;
+                }
                 url = target;
                 redirects++;
                 continue;
             }
             return conn;
-        } while (redirects <= REDIRECTS_MAX);
+        } while (redirects <= redirectsMax);
 
         throw new ProtocolException("Server redirected too many times (" + redirects + ")");
+    }
+
+    public static Data data(String name, Object value) {
+        return data(name, String.valueOf(value));
+    }
+
+    public static Data data(String name, String value) {
+        return new Data().data(name, value);
+    }
+
+    public static class Data {
+        List<String[]> dataList = new ArrayList<>();
+
+        Data() {
+        }
+
+        public Data data(String name, Object value) {
+            return data(name, String.valueOf(value));
+        }
+
+        public Data data(String name, String value) {
+            String[] data = {name, value};
+            dataList.add(data);
+            return this;
+        }
+    }
+
+    /**
+     * A character queue with parsing helpers.
+     */
+    static class TokenQueue {
+        private final String queue;
+        private int pos = 0;
+
+        /**
+         * Create a new TokenQueue.
+         *
+         * @param data string of data to back queue.
+         */
+        public TokenQueue(String data) {
+            queue = data;
+        }
+
+        /**
+         * Tests if the next characters on the queue match the sequence. Case insensitive.
+         *
+         * @param seq String to check queue for.
+         * @return true if the next characters match.
+         */
+        public boolean matches(String seq) {
+            return queue.regionMatches(true, pos, seq, 0, seq.length());
+        }
+
+        /**
+         * Tests if the queue matches the sequence (as with match), and if they do, removes the matched string from the
+         * queue.
+         *
+         * @param seq String to search for, and if found, remove from queue.
+         * @return true if found and removed, false if not found.
+         */
+        public boolean matchChomp(String seq) {
+            if (matches(seq)) {
+                pos += seq.length();
+                return true;
+            } else {
+                return false;
+            }
+        }
+
+        /**
+         * Pulls a string off the queue, up to but exclusive of the match sequence, or to the queue running out.
+         *
+         * @param seq String to end on (and not include in return, but leave on queue). <b>Case sensitive.</b>
+         * @return The matched data consumed from queue.
+         */
+        public String consumeTo(String seq) {
+            int offset = queue.indexOf(seq, pos);
+            if (offset != -1) {
+                String consumed = queue.substring(pos, offset);
+                pos += consumed.length();
+                return consumed;
+            } else {
+                return remainder();
+            }
+        }
+
+        /**
+         * Pulls a string off the queue (like consumeTo), and then pulls off the matched string (but does not return it).
+         * <p>
+         * If the queue runs out of characters before finding the seq, will return as much as it can (and queue will go
+         * isEmpty() == true).
+         *
+         * @param seq String to match up to, and not include in return, and to pull off queue. <b>Case sensitive.</b>
+         * @return Data matched from queue.
+         */
+        public String chompTo(String seq) {
+            String data = consumeTo(seq);
+            matchChomp(seq);
+            return data;
+        }
+
+        /**
+         * Consume and return whatever is left on the queue.
+         *
+         * @return remained of queue.
+         */
+        public String remainder() {
+            final String remainder = queue.substring(pos);
+            pos = queue.length();
+            return remainder;
+        }
+
+        @Override
+        public String toString() {
+            return queue.substring(pos);
+        }
     }
 }
