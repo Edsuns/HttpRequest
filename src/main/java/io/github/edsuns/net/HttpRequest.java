@@ -1,4 +1,4 @@
-package net;
+package io.github.edsuns.net;
 
 import java.io.*;
 import java.net.*;
@@ -19,7 +19,7 @@ public class HttpRequest {
     private static final String DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36";
 
-    private static final int HTTP_TEMP_REDIRECT = 307; // http/1.1 temporary redirect, not in Java's set.
+    private static final int HTTP_TEMP_REDIRECT = 307;// http/1.1 temporary redirect, not in Java's set.
 
     // request header names
     public static final String LOCATION = "Location";
@@ -32,6 +32,11 @@ public class HttpRequest {
     public static final String FORM_URL_ENCODED = "application/x-www-form-urlencoded";
     // response header names
     public static final String SET_COOKIE = "Set-Cookie";
+
+    private static final String[][] DEFAULT_REQUEST_HEADERS = new String[][]{
+            {ACCEPT_CHARSET, DEFAULT_ENCODING.name()},
+            {USER_AGENT, DEFAULT_USER_AGENT},
+    };
 
     /**
      * http request methods
@@ -57,8 +62,10 @@ public class HttpRequest {
     }
 
     private URL url;
+    private final String _url;// origin url
     private final Proxy proxy;
-    private String[][] headers;
+    private String[][] headers;// has setter, no getter
+    private String[][] headersFinal;
     private boolean followRedirects = HttpURLConnection.getFollowRedirects();
     private int timeout = DEFAULT_TIMEOUT;
     private HttpURLConnection connection;
@@ -70,20 +77,12 @@ public class HttpRequest {
     private byte[] bodyBytes;
     private String body;
 
-    public HttpRequest(String url) throws IOException {
-        this(new URL(url));
-    }
-
-    public HttpRequest(String url, Proxy proxy) throws IOException {
-        this(new URL(url), proxy);
-    }
-
-    public HttpRequest(URL url) {
+    public HttpRequest(String url) {
         this(url, null);
     }
 
-    public HttpRequest(URL url, Proxy proxy) {
-        this.url = url;
+    public HttpRequest(String url, Proxy proxy) {
+        this._url = url;
         this.proxy = proxy;
     }
 
@@ -92,9 +91,26 @@ public class HttpRequest {
         return this;
     }
 
+    public HttpRequest headers(Data headers) {
+        return headers(headers.dataList.toArray(new String[0][0]));
+    }
+
+    // only replace headers set by user
     public HttpRequest headers(String[][] headers) {
         this.headers = headers;
         return this;
+    }
+
+    // private getter
+    private String[][] getRequestHeaders() {
+        if (headers == null) {// check if there are headers set by user
+            if (headersFinal == null)
+                headersFinal = DEFAULT_REQUEST_HEADERS;
+        } else {
+            headersFinal = concat(DEFAULT_REQUEST_HEADERS, headers);
+            headers = null;// drop it, already added to headersFinal
+        }
+        return headersFinal;
     }
 
     public HttpRequest followRedirects(boolean followRedirects) {
@@ -102,6 +118,7 @@ public class HttpRequest {
         return this;
     }
 
+    // replace all cookies
     public HttpRequest cookies(Map<String, String> cookies) {
         this.cookies = cookies;
         return this;
@@ -120,18 +137,16 @@ public class HttpRequest {
     }
 
     public HttpRequest exec(Method method, Data data) throws IOException {
-        List<String> rds = new ArrayList<>();
-        Map<String, String> cks = cookies != null ? cookies : new HashMap<>();
-        connection = openConnectionWithRedirects(url, proxy, method, timeout, followRedirects ? REDIRECTS_MAX : 0,
-                concat(new String[][]{
-                        {USER_AGENT, DEFAULT_USER_AGENT},
-                        {ACCEPT_CHARSET, DEFAULT_ENCODING.name()}
-                }, headers),
-                data, rds, cks
+        url = new URL(_url);// always drops the old url
+        if (cookies == null)
+            cookies = new HashMap<>();
+        List<String> rds = new ArrayList<>();// always create a new redirect list
+        connection = openConnectionWithRedirects(url, proxy, method, timeout,
+                followRedirects ? REDIRECTS_MAX : 0,
+                getRequestHeaders(), data, cookies, rds
         );
         url = connection.getURL();
         redirects = Collections.unmodifiableList(rds);
-        cookies = Collections.unmodifiableMap(cks);
         // get status
         status = connection.getResponseCode();
         // response headers
@@ -148,13 +163,17 @@ public class HttpRequest {
         bodyBytes = bo.toByteArray();
         if (encoding != null && bodyBytes.length > 0)
             body = new String(bodyBytes, 0, bodyBytes.length, encoding.name());
-        // disconnect
+        // finish the request
         connection.disconnect();
         return this;
     }
 
     public URL getURL() {
         return url;
+    }
+
+    public String getOriginUrl() {
+        return _url;
     }
 
     public Proxy getProxy() {
@@ -236,8 +255,8 @@ public class HttpRequest {
     }
 
     // create HttpURLConnection but don't trigger any connections
-    static HttpURLConnection createConnection(URL url, Proxy proxy, Method method, int timeout,
-                                              Map<String, String> cookies) throws IOException {
+    private static HttpURLConnection createConnection(URL url, Proxy proxy, Method method, int timeout,
+                                                      Map<String, String> cookies) throws IOException {
         HttpURLConnection conn = (HttpURLConnection) (proxy == null ? url.openConnection() : url.openConnection(proxy));
         conn.setRequestMethod(method.name());
         conn.setConnectTimeout(timeout);
@@ -255,12 +274,12 @@ public class HttpRequest {
 
     private static final char[] mimeBoundaryChars =
             "-_1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
-    static final int boundaryLength = 32;
+    private static final int boundaryLength = 32;
 
     /**
      * Creates a random string, suitable for use as a mime boundary
      */
-    static String mimeBoundary() {
+    private static String mimeBoundary() {
         final StringBuilder mime = new StringBuilder();
         final Random rand = new Random();
         for (int i = 0; i < boundaryLength; i++) {
@@ -269,7 +288,7 @@ public class HttpRequest {
         return mime.toString();
     }
 
-    static URL serialiseRequestUrl(URL in, Data data) throws UnsupportedEncodingException, MalformedURLException {
+    private static URL serialiseRequestUrl(URL in, Data data) throws UnsupportedEncodingException, MalformedURLException {
         StringBuilder url = new StringBuilder();
         boolean first = true;
         // reconstitute the query, ready for appends
@@ -295,7 +314,7 @@ public class HttpRequest {
         return new URL(url.toString());
     }
 
-    static String setOutputContentType(HttpURLConnection conn) {
+    private static String setOutputContentType(HttpURLConnection conn) {
         String bound = null;
         String contentType = conn.getRequestProperty(CONTENT_TYPE);
         if (contentType != null) {
@@ -315,7 +334,7 @@ public class HttpRequest {
         return val.replace("\"", "%22");
     }
 
-    static void writePost(final Data data, final OutputStream outputStream, final String bound) throws IOException {
+    private static void writePost(final Data data, final OutputStream outputStream, final String bound) throws IOException {
         if (data == null || data.dataList.isEmpty())
             return;
 
@@ -360,7 +379,7 @@ public class HttpRequest {
      * @param respCookies cookies from response
      * @return cookie map
      */
-    static Map<String, String> getCookiesFrom(List<String> respCookies) {
+    public static Map<String, String> getCookiesFrom(List<String> respCookies) {
         if (respCookies == null || respCookies.size() <= 0)
             return null;
         Map<String, String> cookies = new HashMap<>();
@@ -385,7 +404,7 @@ public class HttpRequest {
      * @param cookies can be either a request cookie
      * @return request cookie
      */
-    static String toRequestCookieString(Map<String, String> cookies) {
+    private static String toRequestCookieString(Map<String, String> cookies) {
         final StringBuilder builder = new StringBuilder();
         boolean first = true;
         for (Map.Entry<String, String> cookie : cookies.entrySet()) {
@@ -405,9 +424,9 @@ public class HttpRequest {
         return builder.toString();
     }
 
-    static HttpURLConnection openConnectionWithRedirects(
+    private static HttpURLConnection openConnectionWithRedirects(
             URL url, Proxy proxy, Method method, int timeout, int redirectsMax, String[][] requestHeaders, Data data,
-            List<String> tempRedirects, Map<String, String> tempCookies) throws IOException {
+            Map<String, String> tmpCookies, List<String> tmpRedirects) throws IOException {
         String protocol = url.getProtocol();
         if (!protocol.equals("http") && !protocol.equals("https"))
             throw new MalformedURLException("Only http & https protocols supported");
@@ -419,9 +438,9 @@ public class HttpRequest {
 
             if (!methodHasBody && hasRequestData)
                 url = serialiseRequestUrl(url, data);
-            HttpURLConnection conn = createConnection(url, proxy, method, timeout, tempCookies);
+            HttpURLConnection conn = createConnection(url, proxy, method, timeout, tmpCookies);
             // record redirects
-            tempRedirects.add(url.toString());
+            tmpRedirects.add(url.toString());
 
             // set request headers
             if (hasRequestHeaders) {
@@ -439,7 +458,7 @@ public class HttpRequest {
 
             List<String> respCookies = conn.getHeaderFields().get(SET_COOKIE);
             if (respCookies != null)
-                tempCookies.putAll(getCookiesFrom(respCookies));
+                tmpCookies.putAll(getCookiesFrom(respCookies));
 
             int status = conn.getResponseCode();
             if (redirectsMax > 0 && status >= HTTP_MULT_CHOICE && status <= HTTP_TEMP_REDIRECT
@@ -479,7 +498,7 @@ public class HttpRequest {
     }
 
     public static class Data {
-        List<String[]> dataList = new ArrayList<>();
+        final List<String[]> dataList = new ArrayList<>();
 
         Data() {
         }

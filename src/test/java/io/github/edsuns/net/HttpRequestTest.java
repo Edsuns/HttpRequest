@@ -1,4 +1,5 @@
-import net.HttpRequest;
+package io.github.edsuns.net;
+
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -49,9 +50,15 @@ public class HttpRequestTest {
         final String key = "wd";
         final String query = "something";
         final HttpRequest requestGet = new HttpRequest(URL_SUGGESTION_API)
-                .exec(HttpRequest.Method.GET, HttpRequest.data(key, query));
+                .exec(HttpRequest.Method.GET,
+                        HttpRequest.data(key, query)
+                                .data("cb", 1)// just for testing type conversion
+                );
         final HttpRequest requestPost = new HttpRequest(URL_SUGGESTION_API)
-                .exec(HttpRequest.Method.POST, HttpRequest.data(key, query));
+                .exec(HttpRequest.Method.POST,
+                        HttpRequest.data(key, query)
+                                .data("cb", 1)// just for testing type conversion
+                );
 
         assertEquals(requestGet.getStatus(), HTTP_OK);
         assertEquals(requestPost.getStatus(), HTTP_OK);
@@ -66,18 +73,25 @@ public class HttpRequestTest {
     public void testCookies() throws IOException {
         final HttpRequest request = new HttpRequest(URL_HTTP).exec();
         int status = request.getStatus();
-        Map<String, String> cookies = request.getCookies();
+        final Map<String, String> cookies = request.getCookies();
+        final int sizeOriginal = cookies.size();
 
         assertEquals(status, HTTP_OK);
         assertTrue(cookies.size() > 0);
+
+        // drop one cookie
+        cookies.remove(cookies.keySet().iterator().next());
+        final int sizeNew = cookies.size();
+
+        assertEquals(sizeNew, sizeOriginal - 1);
 
         // request again
-        request.cookies(cookies).exec();
+        request.exec();
+        final int sizeFinal = cookies.size();
         status = request.getStatus();
-        cookies = request.getCookies();
 
         assertEquals(status, HTTP_OK);
-        assertTrue(cookies.size() > 0);
+        assertEquals(sizeFinal, sizeOriginal);
     }
 
     @Test
