@@ -7,8 +7,14 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterInputStream;
 
 import static java.net.HttpURLConnection.*;
 
@@ -25,20 +31,22 @@ public class HttpRequest {
 
     private static final int HTTP_TEMP_REDIRECT = 307;// http/1.1 temporary redirect, not in Java's set.
 
-    // request header names
-    public static final String LOCATION = "Location";
+    // request & response header names
     public static final String USER_AGENT = "User-Agent";
     public static final String ACCEPT_CHARSET = "Accept-Charset";
+    public static final String ACCEPT_ENCODING = "Accept-Encoding";
     public static final String COOKIE = "Cookie";
+    public static final String LOCATION = "Location";
     public static final String CONTENT_TYPE = "Content-Type";
+    public static final String CONTENT_ENCODING = "Content-Encoding";
+    public static final String SET_COOKIE = "Set-Cookie";
     // Content-Type
     public static final String MULTIPART_FORM_DATA = "multipart/form-data";
     public static final String FORM_URL_ENCODED = "application/x-www-form-urlencoded";
-    // response header names
-    public static final String SET_COOKIE = "Set-Cookie";
 
     private static final String[][] DEFAULT_REQUEST_HEADERS = new String[][]{
             {USER_AGENT, DEFAULT_USER_AGENT},
+            {ACCEPT_ENCODING, "gzip, deflate"},
     };
 
     /*
@@ -167,15 +175,24 @@ public class HttpRequest {
         status = connection.getResponseCode();
         // response headers
         responseHeaders = connection.getHeaderFields();
-        // get response body
+        // looking for input stream
+        InputStream inputStream = connection.getErrorStream();
+        if (inputStream == null)
+            inputStream = connection.getInputStream();
+        if (hasHeaderWithValue(CONTENT_ENCODING, "gzip"))
+            inputStream = new GZIPInputStream(inputStream);
+        else if (hasHeaderWithValue(CONTENT_ENCODING, "deflate"))
+            inputStream = new InflaterInputStream(inputStream, new Inflater(true));
+        // read body bytes
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
-        crossStreams(connection.getInputStream(), bo);
+        crossStreams(inputStream, bo);
         bodyBytes = bo.toByteArray();
         // get encoding
         String contentType = connection.getContentType();
         encoding = getEncodingFromContentType(contentType);
         if (encoding == null && isTextContentType(contentType))
             encoding = guessEncoding(bodyBytes);
+        // create body string if has text body
         if (encoding != null && bodyBytes.length > 0)
             body = new String(bodyBytes, 0, bodyBytes.length, encoding.name());
         // finish the request
@@ -213,6 +230,22 @@ public class HttpRequest {
 
     public Map<String, List<String>> getResponseHeaders() {
         return responseHeaders;
+    }
+
+    public List<String> getHeader(String name) {
+        if (responseHeaders == null)
+            return null;
+        return responseHeaders.get(name);
+    }
+
+    public boolean hasHeaderWithValue(String name, String value) {
+        List<String> values = getHeader(name);
+        if (values != null)
+            for (String candidate : values) {
+                if (value.equalsIgnoreCase(candidate))
+                    return true;
+            }
+        return false;
     }
 
     public Charset getEncoding() {
@@ -590,6 +623,81 @@ public class HttpRequest {
             dataList.add(data);
             return this;
         }
+    }
+
+    public static Async async(HttpRequest request, Method method) {
+        return async(() -> request, method);
+    }
+
+    public static Async async(Callable<HttpRequest> callable, Method method) {
+        return new Async(callable, method, null);
+    }
+
+    public static Async async(HttpRequest request, Method method, Data data) {
+        return async(() -> request, method, data);
+    }
+
+    public static Async async(Callable<HttpRequest> callable, Method method, Data data) {
+        return new Async(callable, method, data);
+    }
+
+    public static class Async implements Runnable {
+        static volatile ExecutorService executor;
+
+        static ExecutorService getExecutor() {
+            if (executor == null) {
+                synchronized (Async.class) {
+                    if (executor == null)
+                        executor = Executors.newFixedThreadPool(3);
+                }
+            }
+            return executor;
+        }
+
+        final Callable<HttpRequest> callable;
+        final Method method;
+        final Data data;
+        SuccessObserver successObserver;
+        ErrorObserver errorObserver;
+
+        Async(Callable<HttpRequest> callable, Method method, Data data) {
+            this.callable = callable;
+            this.method = method;
+            this.data = data;
+        }
+
+        public void observe(SuccessObserver successObserver) {
+            observe(successObserver, null);
+        }
+
+        public void observe(SuccessObserver successObserver, ErrorObserver errorObserver) {
+            this.successObserver = successObserver;
+            this.errorObserver = errorObserver;
+            if (callable != null)
+                getExecutor().execute(this);
+        }
+
+        @Override
+        public void run() {
+            try {
+                HttpRequest request = callable.call();
+                if (request != null)
+                    request.exec(method, data);
+                if (successObserver != null)
+                    successObserver.onSuccess(request);
+            } catch (Exception e) {
+                if (errorObserver != null)
+                    errorObserver.onError(e);
+            }
+        }
+    }
+
+    public interface SuccessObserver {
+        void onSuccess(HttpRequest request);
+    }
+
+    public interface ErrorObserver {
+        void onError(Exception exception);
     }
 
     /**

@@ -3,10 +3,13 @@ package io.github.edsuns.net;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.SocketTimeoutException;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static java.net.HttpURLConnection.HTTP_OK;
 import static org.junit.jupiter.api.Assertions.*;
@@ -18,6 +21,12 @@ public class HttpRequestTest {
     private static final String URL_HTTP = "http://bing.com";
     private static final String URL_SUGGESTION_API = "https://suggestion.baidu.com/su";
     private static final String URL_NEED_PROXY = "https://www.google.com";
+    private static final String URL_PNG = "https://www.apple.com/apple-touch-icon.png";
+    private static final String URL_404 = "https://www.gstatic.com";
+
+    final String proxyHost = "127.0.0.1";
+    final int proxyPort = 10809;
+    final Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort));
 
     @Test
     public void testFollowRedirects() throws IOException {
@@ -97,9 +106,6 @@ public class HttpRequestTest {
 
     @Test
     public void testProxy() throws IOException {
-        final String proxyHost = "127.0.0.1";
-        final int proxyPort = 10809;
-        final Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort));
         final int timeout = 300;
         final HttpRequest request = new HttpRequest(URL_NEED_PROXY, proxy)
                 .timeout(timeout).exec(HttpRequest.Method.HEAD);
@@ -115,5 +121,54 @@ public class HttpRequestTest {
         assertEquals(status, HTTP_OK);
         assertTrue(request.isBodyEmpty());
         assertNull(requestNoProxy);
+    }
+
+    @Test
+    public void testBodyIsNotText() throws IOException {
+        final HttpRequest request = new HttpRequest(URL_PNG).exec();
+        final int status = request.getStatus();
+
+        assertEquals(status, HTTP_OK);
+        assertFalse(request.hasTextBody());
+        assertTrue(request.getBody().isEmpty());
+        assertTrue(request.getBodyBytes().length > 0);
+    }
+
+    @Test
+    public void testBadStatus() throws IOException {
+        final HttpRequest request = new HttpRequest(URL_404).exec();
+        final int status = request.getStatus();
+
+        assertEquals(status, HttpURLConnection.HTTP_NOT_FOUND);
+        assertFalse(request.getBody().isEmpty());
+    }
+
+    @Test
+    public void testAsyncRequest() throws InterruptedException {
+        final int timeout = 300;
+        final CountDownLatch latch = new CountDownLatch(2);
+
+        final long t = 10;// max time to submit async request
+        final long t1 = System.currentTimeMillis();
+        HttpRequest.async(new HttpRequest(URL_NEED_PROXY, proxy).timeout(timeout), HttpRequest.Method.HEAD)
+                .observe(request -> {
+                    final int status = request.getStatus();
+                    assertEquals(status, HTTP_OK);
+                    latch.countDown();
+                });
+
+        HttpRequest.async(new HttpRequest(URL_NEED_PROXY).timeout(timeout), HttpRequest.Method.HEAD)
+                .observe(request -> {
+                    final int status = request.getStatus();
+                    assertEquals(status, HTTP_OK);
+                }, exception -> {
+                    assertNotNull(exception);
+                    latch.countDown();
+                });
+        final long t2 = System.currentTimeMillis();
+
+        assertTrue(t2 - t1 < t);
+        assertTrue(latch.await(1000, TimeUnit.MILLISECONDS));
+        assertTrue(System.currentTimeMillis() - t2 > t);// true proves that it executes asynchronously
     }
 }

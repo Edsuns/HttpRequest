@@ -68,6 +68,22 @@ public class Demo {
 }
 ```
 
+#### Async Request
+
+```java
+public class Demo {
+    public static void main(String[] args) {
+        HttpRequest.async(new HttpRequest(URL_NEED_PROXY).timeout(timeout),
+                HttpRequest.Method.HEAD)
+                .observe(request -> {
+                    int status = request.getStatus();
+                }, exception -> {
+                    String msg = exception.getMessage();
+                });
+    }
+}
+```
+
 # How To
 
 __Step 1.__ Add the JitPack repository to your build file
@@ -75,7 +91,7 @@ __Step 1.__ Add the JitPack repository to your build file
 Add it in your root build.gradle at the end of repositories:
 
 ```groovy
-    allprojects {
+allprojects {
     repositories {
         ...
         maven { url 'https://jitpack.io' }
@@ -86,7 +102,7 @@ Add it in your root build.gradle at the end of repositories:
 __Step 2.__ Add the dependency
 
 ```groovy
-    dependencies {
+dependencies {
     implementation 'com.github.Edsuns:HttpRequest:Tag'
 }
 ```
