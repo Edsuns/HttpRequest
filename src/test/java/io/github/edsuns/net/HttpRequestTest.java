@@ -66,7 +66,8 @@ public class HttpRequestTest {
         assertEquals(requestPost.getRedirects().size(), 1);
         assertTrue(requestGet.hasTextBody());
         assertTrue(requestPost.hasTextBody());
-        assertEquals(requestGet.getBody(), requestPost.getBody());
+        assertTrue(requestGet.getBody().contains(query));
+        assertTrue(requestPost.getBody().contains(query));
     }
 
     @Test

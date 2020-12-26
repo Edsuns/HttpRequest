@@ -2,9 +2,13 @@ package io.github.edsuns.net;
 
 import java.io.*;
 import java.net.*;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.regex.Pattern;
 
 import static java.net.HttpURLConnection.*;
 
@@ -34,9 +38,13 @@ public class HttpRequest {
     public static final String SET_COOKIE = "Set-Cookie";
 
     private static final String[][] DEFAULT_REQUEST_HEADERS = new String[][]{
-            {ACCEPT_CHARSET, DEFAULT_ENCODING.name()},
             {USER_AGENT, DEFAULT_USER_AGENT},
     };
+
+    /*
+     * Matches XML content types (like text/xml, application/xhtml+xml;charset=UTF8, etc)
+     */
+    private static final Pattern xmlContentTypeRxp = Pattern.compile("(application|text)/\\w*\\+?xml.*");
 
     /**
      * http request methods
@@ -124,16 +132,24 @@ public class HttpRequest {
         return this;
     }
 
-    public HttpRequest exec() throws IOException {
+    public HttpRequest get() throws IOException {
         return exec(Method.GET);
+    }
+
+    public HttpRequest get(Data params) throws IOException {
+        return exec(Method.GET, params);
+    }
+
+    public HttpRequest exec() throws IOException {
+        return get();
+    }
+
+    public HttpRequest exec(Data params) throws IOException {
+        return get(params);
     }
 
     public HttpRequest exec(Method method) throws IOException {
         return exec(method, null);
-    }
-
-    public HttpRequest exec(Data data) throws IOException {
-        return exec(Method.GET, data);
     }
 
     public HttpRequest exec(Method method, Data data) throws IOException {
@@ -151,16 +167,15 @@ public class HttpRequest {
         status = connection.getResponseCode();
         // response headers
         responseHeaders = connection.getHeaderFields();
-        // get encoding
-        encoding = getEncoding(connection);
         // get response body
-        if (status < HTTP_OK || status >= HTTP_BAD_REQUEST) {
-            connection.disconnect();
-            throw new ConnectException("Bad response status");
-        }
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
         crossStreams(connection.getInputStream(), bo);
         bodyBytes = bo.toByteArray();
+        // get encoding
+        String contentType = connection.getContentType();
+        encoding = getEncodingFromContentType(contentType);
+        if (encoding == null && isTextContentType(contentType))
+            encoding = guessEncoding(bodyBytes);
         if (encoding != null && bodyBytes.length > 0)
             body = new String(bodyBytes, 0, bodyBytes.length, encoding.name());
         // finish the request
@@ -209,7 +224,9 @@ public class HttpRequest {
     }
 
     public String getBody() {
-        return body;
+        if (hasTextBody())
+            return body;
+        return "";
     }
 
     public boolean isBodyEmpty() {
@@ -220,22 +237,83 @@ public class HttpRequest {
         return body != null;
     }
 
-    public static Charset getEncoding(HttpURLConnection connection) {
-        String contentEncoding = connection.getContentEncoding();
-        if (contentEncoding != null) {
-            return Charset.forName(contentEncoding);
-        }
+    public boolean isBadStatus() {
+        return status < HTTP_OK || status >= HTTP_BAD_REQUEST;
+    }
 
-        String contentType = connection.getContentType();
+    public static boolean isTextContentType(String contentType) {
+        return contentType != null
+                && (contentType.startsWith("text/") || xmlContentTypeRxp.matcher(contentType).matches());
+    }
+
+    public static Charset getEncodingFromContentType(String contentType) {
         if (contentType != null) {
-            for (String value : contentType.toLowerCase(Locale.US).split(";")) {
+            for (String value : contentType.toLowerCase(Locale.ENGLISH).split(";")) {
                 value = value.trim();
                 if (value.startsWith("charset="))
                     return Charset.forName(value.substring(8));
             }
         }
-
         return null;
+    }
+
+    /**
+     * Combine multi-threading and exclusion to guess the encoding
+     *
+     * @param bytes bytes
+     * @return encoding
+     */
+    public static Charset guessEncoding(final byte[] bytes) {
+        if (bytes == null || bytes.length == 0)
+            return DEFAULT_ENCODING;
+        final CountDownLatch latch = new CountDownLatch(3);// count = validates.length - 1
+        final class Validate extends Thread {
+            private final Charset charset;
+            private byte matches = 2;// 2 means no result yet
+
+            Validate(Charset charset) {
+                this.charset = charset;
+            }
+
+            @Override
+            public void run() {
+                try {
+                    charset.newDecoder().decode(ByteBuffer.wrap(bytes));
+                    matches = 1;// matches
+                } catch (CharacterCodingException e) {
+                    matches = 0;// doesn't match
+                }
+                if (matches == 1)
+                    while (latch.getCount() > 0)
+                        latch.countDown();
+                else
+                    latch.countDown();
+            }
+        }
+        final Validate[] validates = {
+                // these encodings are chosen considering the use of the exclusion
+                new Validate(StandardCharsets.UTF_8),
+                new Validate(StandardCharsets.ISO_8859_1),
+                new Validate(StandardCharsets.US_ASCII),
+                new Validate(Charset.forName("GBK"))
+        };
+        for (Validate validate : validates) {
+            validate.start();
+        }
+        try {
+            latch.await();
+            for (Validate validate : validates) {
+                final byte matches = validate.matches;
+                if (matches == 1) {
+                    return validate.charset;
+                } else if (matches == 2) {
+                    // the one remaining after exclusion
+                    return validate.charset;
+                }
+            }
+        } catch (InterruptedException ignored) {
+        }
+        return DEFAULT_ENCODING;
     }
 
     public static <T> T[] concat(T[] a, T[] b) {

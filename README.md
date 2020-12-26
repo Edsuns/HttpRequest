@@ -22,7 +22,7 @@ public class Demo {
                 .timeout(2000)
                 .followRedirects(true)
                 // get request with url params
-                .exec(HttpRequest.data("name", "value")
+                .get(HttpRequest.data("name", "value")
                         // support for type conversion
                         .data("integer", 1)
                 );
@@ -64,7 +64,6 @@ public class Demo {
         HttpRequest request = new HttpRequest(url, proxy)
                 .timeout(timeout).exec(HttpRequest.Method.HEAD);
         int status = request.getStatus();
-        String body = request.getBody();
     }
 }
 ```
@@ -75,19 +74,19 @@ __Step 1.__ Add the JitPack repository to your build file
 
 Add it in your root build.gradle at the end of repositories:
 
-```
-	allprojects {
-		repositories {
-			...
-			maven { url 'https://jitpack.io' }
-		}
-	}
+```groovy
+    allprojects {
+    repositories {
+        ...
+        maven { url 'https://jitpack.io' }
+    }
+}
 ```
 
 __Step 2.__ Add the dependency
 
-```
-	dependencies {
-	        implementation 'com.github.Edsuns:HttpRequest:Tag'
-	}
+```groovy
+    dependencies {
+    implementation 'com.github.Edsuns:HttpRequest:Tag'
+}
 ```
