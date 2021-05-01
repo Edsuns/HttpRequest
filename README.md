@@ -4,7 +4,7 @@
 
 A small-size but efficient library makes http request easier for java.
 
-# Demo
+## Demo
 
 #### Normal Usage
 
@@ -75,16 +75,16 @@ public class Demo {
     public static void main(String[] args) {
         HttpRequest.async(new HttpRequest(URL_NEED_PROXY).timeout(timeout),
                 HttpRequest.Method.HEAD)
-                .observe(request -> {
+                .observe(request -> {// when request success
                     int status = request.getStatus();
-                }, exception -> {
+                }, exception -> {// when an exception is caught
                     String msg = exception.getMessage();
                 });
     }
 }
 ```
 
-# How To
+## How To
 
 __Step 1.__ Add the JitPack repository to your build file
 

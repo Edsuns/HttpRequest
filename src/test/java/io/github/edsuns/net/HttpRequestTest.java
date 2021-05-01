@@ -36,8 +36,8 @@ public class HttpRequestTest {
         final int redirectsSize = request.getRedirects().size();
         final int bodyLength = request.getBody().length();
 
-        assertEquals(status, HTTP_OK);
-        assertNotEquals(url, URL_HTTP);
+        assertEquals(HTTP_OK, status);
+        assertNotEquals(URL_HTTP, url);
         assertTrue(redirectsSize > 1);
         assertTrue(bodyLength > 0);
     }
@@ -49,8 +49,8 @@ public class HttpRequestTest {
         final String url = request.getURL().toString();
         final int redirectsSize = request.getRedirects().size();
 
-        assertNotEquals(status, HTTP_OK);
-        assertEquals(url, URL_HTTP);
+        assertNotEquals(HTTP_OK, status);
+        assertEquals(URL_HTTP, url);
         assertEquals(redirectsSize, 1);
     }
 
@@ -69,10 +69,10 @@ public class HttpRequestTest {
                                 .data("cb", 1)// just for testing type conversion
                 );
 
-        assertEquals(requestGet.getStatus(), HTTP_OK);
-        assertEquals(requestPost.getStatus(), HTTP_OK);
-        assertEquals(requestGet.getRedirects().size(), 1);
-        assertEquals(requestPost.getRedirects().size(), 1);
+        assertEquals(HTTP_OK, requestGet.getStatus());
+        assertEquals(HTTP_OK, requestPost.getStatus());
+        assertEquals(1, requestGet.getRedirects().size());
+        assertEquals(1, requestPost.getRedirects().size());
         assertTrue(requestGet.hasTextBody());
         assertTrue(requestPost.hasTextBody());
         assertTrue(requestGet.getBody().contains(query));
@@ -86,22 +86,22 @@ public class HttpRequestTest {
         final Map<String, String> cookies = request.getCookies();
         final int sizeOriginal = cookies.size();
 
-        assertEquals(status, HTTP_OK);
+        assertEquals(HTTP_OK, status);
         assertTrue(cookies.size() > 0);
 
         // drop one cookie
         cookies.remove(cookies.keySet().iterator().next());
         final int sizeNew = cookies.size();
 
-        assertEquals(sizeNew, sizeOriginal - 1);
+        assertEquals(sizeOriginal - 1, sizeNew);
 
         // request again
         request.exec();
         final int sizeFinal = cookies.size();
         status = request.getStatus();
 
-        assertEquals(status, HTTP_OK);
-        assertEquals(sizeFinal, sizeOriginal);
+        assertEquals(HTTP_OK, status);
+        assertEquals(sizeOriginal, sizeFinal);
     }
 
     @Test
@@ -118,7 +118,7 @@ public class HttpRequestTest {
         } catch (SocketTimeoutException ignored) {
         }
 
-        assertEquals(status, HTTP_OK);
+        assertEquals(HTTP_OK, status);
         assertTrue(request.isBodyEmpty());
         assertNull(requestNoProxy);
     }
@@ -128,7 +128,7 @@ public class HttpRequestTest {
         final HttpRequest request = new HttpRequest(URL_PNG).exec();
         final int status = request.getStatus();
 
-        assertEquals(status, HTTP_OK);
+        assertEquals(HTTP_OK, status);
         assertFalse(request.hasTextBody());
         assertTrue(request.getBody().isEmpty());
         assertTrue(request.getBodyBytes().length > 0);
@@ -139,7 +139,7 @@ public class HttpRequestTest {
         final HttpRequest request = new HttpRequest(URL_404).exec();
         final int status = request.getStatus();
 
-        assertEquals(status, HttpURLConnection.HTTP_NOT_FOUND);
+        assertEquals(HttpURLConnection.HTTP_NOT_FOUND, status);
         assertFalse(request.getBody().isEmpty());
     }
 
@@ -149,26 +149,26 @@ public class HttpRequestTest {
         final CountDownLatch latch = new CountDownLatch(2);
 
         final long t = 10;// max time to submit async request
-        final long t1 = System.currentTimeMillis();
+        final long begin = System.currentTimeMillis();
         HttpRequest.async(new HttpRequest(URL_NEED_PROXY, proxy).timeout(timeout), HttpRequest.Method.HEAD)
                 .observe(request -> {
                     final int status = request.getStatus();
-                    assertEquals(status, HTTP_OK);
+                    assertEquals(HTTP_OK, status);
                     latch.countDown();
                 });
 
         HttpRequest.async(new HttpRequest(URL_NEED_PROXY).timeout(timeout), HttpRequest.Method.HEAD)
                 .observe(request -> {
                     final int status = request.getStatus();
-                    assertEquals(status, HTTP_OK);
+                    assertEquals(HTTP_OK, status);
                 }, exception -> {
                     assertNotNull(exception);
                     latch.countDown();
                 });
-        final long t2 = System.currentTimeMillis();
+        final long end = System.currentTimeMillis();
 
-        assertTrue(t2 - t1 < t);
+        assertTrue(end - begin < t);
         assertTrue(latch.await(1000, TimeUnit.MILLISECONDS));
-        assertTrue(System.currentTimeMillis() - t2 > t);// true proves that it executes asynchronously
+        assertTrue(System.currentTimeMillis() - end > t);// true proves that it executes asynchronously
     }
 }

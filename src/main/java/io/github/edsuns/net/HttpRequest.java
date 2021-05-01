@@ -23,7 +23,7 @@ import static java.net.HttpURLConnection.*;
  */
 public class HttpRequest {
     private static final int DEFAULT_BUFFER_SIZE = 1024 * 16;
-    private static final int DEFAULT_TIMEOUT = 5000;
+    private static final int DEFAULT_TIMEOUT = 10000;// 10 seconds
     private static final int REDIRECTS_MAX = 10;
     private static final Charset DEFAULT_ENCODING = StandardCharsets.UTF_8;
     private static final String DEFAULT_USER_AGENT =
@@ -40,6 +40,59 @@ public class HttpRequest {
     public static final String CONTENT_TYPE = "Content-Type";
     public static final String CONTENT_ENCODING = "Content-Encoding";
     public static final String SET_COOKIE = "Set-Cookie";
+    /**
+     * <p>请求下载范围：{@value}</p>
+     * <p>返回数据范围：Content-Range=bytes 0-100/100</p>
+     *
+     * @see #HEADER_RANGE
+     */
+    public static final String HEADER_CONTENT_RANGE = "Content-Range";
+    /**
+     * <p>接收范围请求：{@value}</p>
+     * <p>返回全部数据：Accept-Ranges=bytes</p>
+     *
+     * @see #HEADER_RANGE
+     */
+    public static final String HEADER_ACCEPT_RANGES = "Accept-Ranges";
+    /**
+     * <p>范围请求：{@value}</p>
+     * <table border="1">
+     * 	<caption>HTTP协议断点续传设置</caption>
+     * 	<tr>
+     * 		<td>Range: bytes=0-499</td>
+     * 		<td>范围：0-499</td>
+     * 	</tr>
+     * 	<tr>
+     * 		<td>Range: bytes=500-999</td>
+     * 		<td>范围：500-999</td>
+     * 	</tr>
+     * 	<tr>
+     * 		<td>Range: bytes=-500</td>
+     * 		<td>最后500字节</td>
+     * 	</tr>
+     * 	<tr>
+     * 		<td>Range: bytes=500-</td>
+     * 		<td>500字节开始到结束</td>
+     * 	</tr>
+     * 	<tr>
+     * 		<td>Range: bytes=0-0,-1</td>
+     * 		<td>第一个字节和最后一个字节</td>
+     * 	</tr>
+     * 	<tr>
+     * 		<td>Range: bytes=500-600,601-999</td>
+     * 		<td>同时指定多个范围</td>
+     * 	</tr>
+     * </table>
+     */
+    public static final String HEADER_RANGE = "Range";
+    /**
+     * <p>接收范围请求：{@value}</p>
+     *
+     * @see #HEADER_CONTENT_RANGE
+     * @see #HEADER_ACCEPT_RANGES
+     */
+    public static final String HEADER_VALUE_BYTES = "bytes";
+
     // Content-Type
     public static final String MULTIPART_FORM_DATA = "multipart/form-data";
     public static final String FORM_URL_ENCODED = "application/x-www-form-urlencoded";
@@ -89,6 +142,9 @@ public class HttpRequest {
     private Map<String, String> cookies;
     private int status;
     private Map<String, List<String>> responseHeaders;
+    private InputStream inputStream;
+    private boolean inputStreamHasBeenObtained;
+    private boolean responseLoaded = true;
     private Charset encoding;
     private byte[] bodyBytes;
     private String body;
@@ -98,7 +154,7 @@ public class HttpRequest {
     }
 
     public HttpRequest(String url, Proxy proxy) {
-        this._url = url;
+        this._url = Objects.requireNonNull(url, "url must not be null");
         this.proxy = proxy;
     }
 
@@ -161,43 +217,74 @@ public class HttpRequest {
     }
 
     public HttpRequest exec(Method method, Data data) throws IOException {
-        url = new URL(_url);// always drops the old url
+        reset();
         if (cookies == null)
             cookies = new HashMap<>();
-        List<String> rds = new ArrayList<>();// always create a new redirect list
         connection = openConnectionWithRedirects(url, proxy, method, timeout,
                 followRedirects ? REDIRECTS_MAX : 0,
-                getRequestHeaders(), data, cookies, rds
+                getRequestHeaders(), data, cookies, redirects
         );
         url = connection.getURL();
-        redirects = Collections.unmodifiableList(rds);
+        redirects = Collections.unmodifiableList(redirects);
         // get status
         status = connection.getResponseCode();
         // response headers
         responseHeaders = connection.getHeaderFields();
         // looking for input stream
-        InputStream inputStream = connection.getErrorStream();
+        inputStream = connection.getErrorStream();
         if (inputStream == null)
             inputStream = connection.getInputStream();
         if (hasHeaderWithValue(CONTENT_ENCODING, "gzip"))
             inputStream = new GZIPInputStream(inputStream);
         else if (hasHeaderWithValue(CONTENT_ENCODING, "deflate"))
             inputStream = new InflaterInputStream(inputStream, new Inflater(true));
-        // read body bytes
-        ByteArrayOutputStream bo = new ByteArrayOutputStream();
-        crossStreams(inputStream, bo);
-        bodyBytes = bo.toByteArray();
-        // get encoding
-        String contentType = connection.getContentType();
-        encoding = getEncodingFromContentType(contentType);
-        if (encoding == null && isTextContentType(contentType))
-            encoding = guessEncoding(bodyBytes);
-        // create body string if has text body
-        if (encoding != null && bodyBytes.length > 0)
-            body = new String(bodyBytes, 0, bodyBytes.length, encoding.name());
-        // finish the request
-        connection.disconnect();
         return this;
+    }
+
+    public HttpRequest loadResponse() throws IOException {
+        if (inputStream == null) {
+            throw new IllegalStateException("Request not yet executed!");
+        }
+        if (inputStreamHasBeenObtained) {
+            throw new IllegalStateException("The input stream has been obtained by method getInputStream().");
+        }
+        if (responseLoaded) {
+            return this;
+        }
+        try {
+            // read body bytes
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            crossStreams(inputStream, bo);
+            bodyBytes = bo.toByteArray();
+            // get encoding
+            String contentType = connection.getContentType();
+            encoding = getEncodingFromContentType(contentType);
+            if (encoding == null && isTextContentType(contentType))
+                encoding = guessEncoding(bodyBytes);
+            // create body string if has text body
+            if (encoding != null && bodyBytes.length > 0)
+                body = new String(bodyBytes, 0, bodyBytes.length, encoding.name());
+        } finally {
+            responseLoaded = true;
+            // finish the request
+            connection.disconnect();
+        }
+        return this;
+    }
+
+    // restore to initial state
+    private void reset() throws MalformedURLException {
+        url = new URL(_url);// always drops the old url
+        redirects = new ArrayList<>();// always create a new redirect list
+        connection = null;
+        status = -1;
+        responseHeaders = null;
+        inputStream = null;
+        inputStreamHasBeenObtained = false;
+        responseLoaded = false;
+        encoding = null;
+        bodyBytes = null;
+        body = null;
     }
 
     public URL getURL() {
@@ -232,6 +319,11 @@ public class HttpRequest {
         return responseHeaders;
     }
 
+    public InputStream getInputStream() {
+        inputStreamHasBeenObtained = true;
+        return inputStream;
+    }
+
     public List<String> getHeader(String name) {
         if (responseHeaders == null)
             return null;
@@ -248,25 +340,44 @@ public class HttpRequest {
         return false;
     }
 
-    public Charset getEncoding() {
+    /**
+     * <p>Determine if breakpoint transfer is supported.</p>
+     *
+     * @return true if breakpoint transfer is supported
+     * @see #HEADER_CONTENT_RANGE
+     * @see #HEADER_ACCEPT_RANGES
+     */
+    public boolean isBreakpointAvailable() {
+        if (hasHeaderWithValue(HEADER_ACCEPT_RANGES, HEADER_VALUE_BYTES)) {
+            return true;
+        }
+        return getHeader(HEADER_CONTENT_RANGE) != null;
+    }
+
+    public Charset getEncoding() throws IOException {
+        loadResponse();
         return encoding;
     }
 
-    public byte[] getBodyBytes() {
+    public byte[] getBodyBytes() throws IOException {
+        loadResponse();
         return bodyBytes;
     }
 
-    public String getBody() {
+    public String getBody() throws IOException {
+        loadResponse();
         if (hasTextBody())
             return body;
         return "";
     }
 
-    public boolean isBodyEmpty() {
+    public boolean isBodyEmpty() throws IOException {
+        loadResponse();
         return bodyBytes == null || bodyBytes.length == 0;
     }
 
-    public boolean hasTextBody() {
+    public boolean hasTextBody() throws IOException {
+        loadResponse();
         return body != null;
     }
 
@@ -693,7 +804,7 @@ public class HttpRequest {
     }
 
     public interface SuccessObserver {
-        void onSuccess(HttpRequest request);
+        void onSuccess(HttpRequest request) throws IOException;
     }
 
     public interface ErrorObserver {
