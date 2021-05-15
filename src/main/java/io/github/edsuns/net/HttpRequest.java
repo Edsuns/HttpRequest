@@ -103,9 +103,10 @@ public class HttpRequest {
     };
 
     /*
-     * Matches XML content types (like text/xml, application/xhtml+xml;charset=UTF8, etc)
+     * Matches text content types (like text/xml, application/javascript, application/xhtml+xml;charset=UTF8, etc)
+     * https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types#important_mime_types_for_web_developers
      */
-    private static final Pattern xmlContentTypeRxp = Pattern.compile("(application|text)/\\w*\\+?xml.*");
+    private static final Pattern textContentTypeRxp = Pattern.compile("(?:application|text)/\\w*(?:xml|script).*");
 
     /**
      * http request methods
@@ -324,10 +325,25 @@ public class HttpRequest {
         return inputStream;
     }
 
+    /**
+     * Get response headers by name.
+     *
+     * @param name nullable
+     * @return response headers
+     */
     public List<String> getHeader(String name) {
         if (responseHeaders == null)
             return null;
-        return responseHeaders.get(name);
+        List<String> header = responseHeaders.get(name);
+        if (header == null && name != null) {
+            // find target headers ignore case
+            for (Map.Entry<String, List<String>> item : responseHeaders.entrySet()) {
+                if (name.equalsIgnoreCase(item.getKey())) {
+                    return item.getValue();
+                }
+            }
+        }
+        return header;
     }
 
     public boolean hasHeaderWithValue(String name, String value) {
@@ -387,7 +403,7 @@ public class HttpRequest {
 
     public static boolean isTextContentType(String contentType) {
         return contentType != null
-                && (contentType.startsWith("text/") || xmlContentTypeRxp.matcher(contentType).matches());
+                && (contentType.startsWith("text/") || textContentTypeRxp.matcher(contentType).matches());
     }
 
     public static Charset getEncodingFromContentType(String contentType) {
